@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dffc"
+version = "0.2.0"
+description = "DFFC quantitative finance module"
+requires-python = ">=3.10"
+dependencies = [
+    "vectorbt",
+    "pandas",
+    "numpy",
+    "matplotlib",
+    "plotly",
+    "requests",
+    "beautifulsoup4",
+    "lxml",
+    "numba",
+    "yfinance",
+    "tqdm",
+    "streamlit",
+]
+
+[tool.setuptools]
+packages = ["dffc"]
