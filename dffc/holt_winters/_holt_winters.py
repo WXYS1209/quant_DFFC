@@ -42,7 +42,7 @@ def holt_winters_ets_1d_nb(a: tp.Array1d,
                            alpha: float,
                            beta: float,
                            gamma: float,
-                           m: int,
+                           season_length: int,
                            multiplicative: bool = True) -> tp.Array1d:
     """
     ETS(A, A, A/M) Holt–Winters (triple exponential smoothing), one-step-ahead fitted values.
@@ -53,7 +53,7 @@ def holt_winters_ets_1d_nb(a: tp.Array1d,
         输入时间序列（float）。要求已清洗为数值且无 NaN（Numba 下不处理缺失）。
     alpha, beta, gamma : float in (0, 1)
         水平/趋势/季节 平滑参数。
-    m : int
+    season_length : int
         季节长度（如 5/20/252）。
     multiplicative : bool
         是否使用乘法季节模型。False为加法模型(A,A,A)，True为乘法模型(A,A,M)。
@@ -66,7 +66,7 @@ def holt_winters_ets_1d_nb(a: tp.Array1d,
     n = len(a)
     
     # Parameter validation
-    if n < 2 * m:
+    if n < 2 * season_length:
         raise ValueError("Data length must be at least 2 * seasonal_periods")
     if not (0.0 <= alpha <= 1.0):
         raise ValueError("alpha must be in [0, 1]")
@@ -74,8 +74,8 @@ def holt_winters_ets_1d_nb(a: tp.Array1d,
         raise ValueError("beta must be in [0, 1]")
     if not (0.0 <= gamma <= 1.0):
         raise ValueError("gamma must be in [0, 1]")
-    if m < 1:
-        raise ValueError("m must be >= 1")
+    if season_length < 1:
+        raise ValueError("season_length must be >= 1")
     
     # 乘法模型需要正值
     if multiplicative and np.any(a <= 0):
@@ -90,20 +90,20 @@ def holt_winters_ets_1d_nb(a: tp.Array1d,
     seasonal = np.zeros(n, dtype=np.float64)
     
     # Initial values - improved method
-    # Level: average of first m observations
-    l0 = np.mean(a[:m])
+    # Level: average of first season_length observations
+    l0 = np.mean(a[:season_length])
     
     # Trend: average of differences between first and second seasons
-    t0 = (np.mean(a[m:2*m]) - np.mean(a[:m])) / m
+    t0 = (np.mean(a[season_length:2*season_length]) - np.mean(a[:season_length])) / season_length
     
     # Seasonal: improved initial seasonal components
-    s0 = np.zeros(m, dtype=np.float64)
+    s0 = np.zeros(season_length, dtype=np.float64)
     
     if multiplicative:
         # 乘法模型：计算季节性因子（相对于去趋势水平的比值）
-        for i in range(m):
+        for i in range(season_length):
             seasonal_vals = []
-            for j in range(i, min(n, 2*m), m):
+            for j in range(i, min(n, 2*season_length), season_length):
                 detrended_level = l0 + t0 * j
                 if detrended_level != 0:
                     seasonal_factor = a[j] / detrended_level
@@ -117,17 +117,17 @@ def holt_winters_ets_1d_nb(a: tp.Array1d,
         # 标准化季节因子使其平均值为1（乘法模型约束）
         s0_mean = np.mean(s0)
         if s0_mean != 0:
-            for i in range(m):
+            for i in range(season_length):
                 s0[i] = s0[i] / s0_mean
         else:
             # 如果平均值为0，设置为1（无季节性）
-            for i in range(m):
+            for i in range(season_length):
                 s0[i] = 1.0
     else:
         # 加法模型：原有逻辑
-        for i in range(m):
+        for i in range(season_length):
             seasonal_vals = []
-            for j in range(i, min(n, 2*m), m):
+            for j in range(i, min(n, 2*season_length), season_length):
                 detrended = a[j] - (l0 + t0 * j)
                 seasonal_vals.append(detrended)
             
@@ -138,7 +138,7 @@ def holt_winters_ets_1d_nb(a: tp.Array1d,
 
         # 标准化季节分量使其和为0（加法模型约束）
         s0_mean = np.mean(s0)
-        for i in range(m):
+        for i in range(season_length):
             s0[i] -= s0_mean
     
     # Recursive calculation
@@ -152,10 +152,10 @@ def holt_winters_ets_1d_nb(a: tp.Array1d,
             t_prev = trend[t-1]
 
         # Get seasonal component
-        if t < m:
+        if t < season_length:
             s_tm = s0[t]
         else:
-            s_tm = seasonal[t-m]
+            s_tm = seasonal[t-season_length]
             
         # One-step-ahead forecast for current period
         if multiplicative:
@@ -194,7 +194,7 @@ def holt_winters_ets_nb(a: tp.Array2d,
                alpha: float,
                beta: float,
                gamma: float,
-               m: int,
+               season_length: int,
                multiplicative: bool = True) -> tp.Array2d:
     """
     2-dim version of `holt_winters_1d_nb`.
@@ -203,7 +203,7 @@ def holt_winters_ets_nb(a: tp.Array2d,
     """
     out = np.empty_like(a, dtype=np.float64)
     for col in range(a.shape[1]):
-        out[:, col] = holt_winters_ets_1d_nb(a[:, col], alpha, beta, gamma, m, multiplicative)
+        out[:, col] = holt_winters_ets_1d_nb(a[:, col], alpha, beta, gamma, season_length, multiplicative)
     return out
 
 @njit(cache=True)
@@ -213,10 +213,10 @@ def hw_delta_nb(close: tp.Array2d, hw: tp.Array2d) -> tp.Array2d:
 
 
 @njit(cache=True)
-def hw_delta_apply_nb(close: tp.Array2d, alpha: float, beta: float, gamma: float, m: int, multiplicative: bool,
+def hw_delta_apply_nb(close: tp.Array2d, alpha: float, beta: float, gamma: float, season_length: int, multiplicative: bool,
                       cache_dict: tp.Dict[int, tp.Array2d]) -> tp.Array2d:
     """Apply function for Holt-Winters Delta indicators."""
-    hw = hw_apply_nb(close, alpha, beta, gamma, m, multiplicative, cache_dict)
+    hw = hw_apply_nb(close, alpha, beta, gamma, season_length, multiplicative, cache_dict)
     return hw_delta_nb(close, hw)
 
 
@@ -281,30 +281,30 @@ def hw_delta_percentage_cache_nb(close: tp.Array2d,
                                 alphas: tp.List[float],
                                 betas: tp.List[float], 
                                 gammas: tp.List[float],
-                                ms: tp.List[int],
+                                season_lengths: tp.List[int],
                                 multiplicatives: tp.List[bool]
                                 ) -> tp.Dict[int, tp.Array2d]:
     """Caching function for Holt-Winters Delta Percentage indicators."""
     cache_dict = dict()
-    hw_cache = hw_cache_nb(close, alphas, betas, gammas, ms, multiplicatives)
+    hw_cache = hw_cache_nb(close, alphas, betas, gammas, season_lengths, multiplicatives)
     
     for i in range(len(alphas)):
-        hw_h = hash((alphas[i], betas[i], gammas[i], ms[i], multiplicatives[i]))
+        hw_h = hash((alphas[i], betas[i], gammas[i], season_lengths[i], multiplicatives[i]))
         hw_val = hw_cache[hw_h]
         hwd = hw_delta_nb(close, hw_val)
         
-        h = hash((alphas[i], betas[i], gammas[i], ms[i], multiplicatives[i]))
+        h = hash((alphas[i], betas[i], gammas[i], season_lengths[i], multiplicatives[i]))
         if h not in cache_dict:
             cache_dict[h] = hw_delta_percentage_nb(hwd)
     return cache_dict
 
 
 @njit(cache=True)
-def hw_delta_percentage_apply_nb(close: tp.Array2d, alpha: float, beta: float, gamma: float, m: int, 
+def hw_delta_percentage_apply_nb(close: tp.Array2d, alpha: float, beta: float, gamma: float, season_length: int, 
                                 multiplicative: bool,
                                 cache_dict: tp.Dict[int, tp.Array2d]) -> tp.Array2d:
     """Apply function for Holt-Winters Delta Percentage indicators."""
-    h = hash((alpha, beta, gamma, m, multiplicative))
+    h = hash((alpha, beta, gamma, season_length, multiplicative))
     return cache_dict[h]
 
 
@@ -313,7 +313,7 @@ HW = IndicatorFactory(
     module_name=__name__,
     short_name='hw',
     input_names=['close'],
-    param_names=['alpha', 'beta', 'gamma', 'm', 'multiplicative'],
+    param_names=['alpha', 'beta', 'gamma', 'season_length', 'multiplicative'],
     output_names=['hw']
 ).from_apply_func(
     hw_apply_nb,
@@ -328,7 +328,7 @@ HWD = IndicatorFactory(
     module_name=__name__,
     short_name='hwd',
     input_names=['close'],
-    param_names=['alpha', 'beta', 'gamma', 'm', 'multiplicative'],
+    param_names=['alpha', 'beta', 'gamma', 'season_length', 'multiplicative'],
     output_names=['hwd']
 ).from_apply_func(
     hw_delta_apply_nb,
@@ -341,7 +341,7 @@ HWDP = IndicatorFactory(
     module_name=__name__,
     short_name='hwdp',
     input_names=['close'],
-    param_names=['alpha', 'beta', 'gamma', 'm', 'multiplicative'],
+    param_names=['alpha', 'beta', 'gamma', 'season_length', 'multiplicative'],
     output_names=['hwdp']
 ).from_apply_func(
     hw_delta_percentage_apply_nb,

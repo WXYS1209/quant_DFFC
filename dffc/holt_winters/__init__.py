@@ -22,8 +22,11 @@ from dffc.holt_winters._holt_winters import (
 )
 
 from dffc.holt_winters._optimization import (
+    HWOptimizer,
+    HWAssetResult,
     process_hw_opt,
-    # 导入其他优化相关函数
+    plot_hw_opt,
+    compute_hw_curves,
 )
 
 __all__ = [
@@ -33,7 +36,11 @@ __all__ = [
     "HWDP",
     
     # 优化功能
+    "HWOptimizer",
+    "HWAssetResult",
     "process_hw_opt",
+    "plot_hw_opt",
+    "compute_hw_curves",
 ]
 
 # 模块元信息
