@@ -26,6 +26,11 @@ import matplotlib.pyplot as plt
 from itertools import product
 from abc import ABC, abstractmethod
 
+from vectorbt.utils.datetime_ import to_tzaware_datetime
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from tqdm import tqdm
+import vectorbt as vbt
+
 class BackTest(ABC):
     """Thin orchestrator around a Strategy instance.
 
@@ -49,28 +54,13 @@ class BackTest(ABC):
         self._run_defaults = dict(run_kwargs)
         self._multi = None
 
-    def run(self, **kwargs: Any) -> SimpleNamespace:
-        """Execute ``strategy.run_backtest`` with merged keyword arguments.
-
-        Parameters
-        ----------
-        **kwargs
-            Per-call overrides forwarded directly to
-            :meth:`strategy.run_backtest`.  Any defaults supplied to the
-            constructor are merged with these values (per-call arguments win).
-
-        Returns
-        -------
-        SimpleNamespace
-            Whatever object the concrete strategy returns.  For convenience the
-            resulting portfolio is cached on ``self.pf`` for subsequent use.
+    @abstractmethod
+    def run(self, 
+            **kwargs):
         """
-        # Merge init defaults with call-time kwargs (call-time takes precedence)
-        merged = {**getattr(self, '_run_defaults', {}), **kwargs}
-        self.pf = self.strategy.run_backtest(**merged)
-
-        pf_size = self.pf.wrapper.shape[1]
-        self._multi = (pf_size != self.strategy.backtest_prices.shape[1])
+        Run backtest - must be implemented by subclasses
+        """
+        pass
     
     def stats(self,
               selected: Any = None) -> Any:
@@ -159,6 +149,136 @@ class BackTest(ABC):
 
 class ReallocationBackTest(BackTest):
 
+    def run(self,
+            start_date=None,
+            end_date=None,
+            group_by=None,
+            initial_cash=10_000.,
+            fees=0.,
+            trade_delay=0,
+            max_workers: int | None = None):
+        """
+        运行再平衡策略回测（支持多资产）
+        
+        Args:
+            initial_cash: float, 初始资金
+            fees: float, 交易费用率
+            trade_delay: int, 交易执行延迟天数 (0=T+0, 1=T+1, 2=T+2, etc.)
+                        基金推荐使用 trade_delay=1 (T+1)
+            max_workers: Optional[int], 使用进程池处理参数组合的最大进程数。
+                         None 表示使用默认值；≤1 则按顺序执行。
+            
+        Returns:
+            SimpleNamespace: 结果对象，可通过 res.portfolio 访问（也支持 dict 风格 via vars(res)['portfolio']）
+        """
+        
+        if start_date is not None:
+            start_date = to_tzaware_datetime(start_date)
+        if end_date is not None:
+            end_date = to_tzaware_datetime(end_date)
+        self.backtest_prices = self.strategy.prices.loc[start_date:end_date]
+
+        combos = self.strategy._get_param_combinations()
+        self.combos = combos
+
+        if group_by is None:
+            group_by = 'param_group' # True if len(combos) == 1 else 'param_group'
+        
+        pids = pd.Index(range(len(combos)), name=group_by)
+
+        rb_mask = pd.Series(True, index=self.backtest_prices.index)
+        # rb_mask = self._create_rebalance_schedule()
+        
+        backtest_prices_tiled = self.backtest_prices.vbt.tile(len(combos), keys=pids)
+
+        orders_blocks: list[pd.DataFrame] = []
+        pid_to_combo: dict[int, dict] = {}
+
+        combo_results: list[tuple[int, dict, pd.DataFrame]] = []
+        parallel_enabled = (max_workers is None or max_workers > 1) and len(combos) > 1
+
+        if parallel_enabled:
+            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(
+                        self.strategy._process_combo,
+                        pid,
+                        combos[pid],
+                        rb_mask,
+                        trade_delay,
+                        group_by
+                    ): pid
+                    for pid in range(len(combos))
+                }
+
+                for future in tqdm(as_completed(futures), total=len(futures)):
+                    combo_results.append(future.result())
+        else:
+            for pid, combo in enumerate(tqdm(combos)):
+                combo_results.append(self.strategy._process_combo(pid, combo, rb_mask, trade_delay, group_by))
+
+        combo_results.sort(key=lambda item: item[0])
+        self.debug_combo_results = combo_results
+        for pid, combo, orders in combo_results:
+            orders_blocks.append(orders)
+            pid_to_combo[pid] = combo
+            
+        orders_size = pd.concat(orders_blocks, axis=1).sort_index(axis=1)
+
+        self.param_group_map = pid_to_combo
+
+        # Change column names
+        backtest_prices_tiled = backtest_prices_tiled.reindex(columns=orders_size.columns)
+
+        param_keys = list(combos[0].keys())
+        column_meta: dict[str, list] = {key: [] for key in param_keys}
+
+        for pid, symbol in orders_size.columns:
+            combo = pid_to_combo.get(pid, {})
+            for key in param_keys:
+                normalised = self.strategy._normalise_param_value(combo.get(key))
+                column_meta[key].append(normalised)
+
+        for key in reversed(param_keys):
+            idx = pd.Index(column_meta[key], name=key)
+            orders_size = orders_size.vbt.stack_index(idx)
+            backtest_prices_tiled = backtest_prices_tiled.vbt.stack_index(idx)
+
+        desired_order = [group_by, *param_keys, 'symbol']
+
+        self.orders_size = (orders_size
+                            .reorder_levels(desired_order, axis=1)
+                            .sort_index(axis=1))
+        self.backtest_prices_tiled = (backtest_prices_tiled
+                                      .reorder_levels(desired_order, axis=1)
+                                      .sort_index(axis=1))
+
+        metadata_records = []
+        for pid, combo in pid_to_combo.items():
+            record = {'param_group': pid}
+            record.update({key: self.strategy._normalise_param_value(combo.get(key)) for key in param_keys})
+            metadata_records.append(record)
+        self.param_metadata = (pd.DataFrame(metadata_records)
+                                .set_index('param_group')
+                                .sort_index())
+        
+        # 使用vectorbt运行回测
+        portfolio = vbt.Portfolio.from_orders(
+            close=self.backtest_prices_tiled,
+            size=self.orders_size,
+            size_type='targetpercent',
+            group_by=group_by,
+            cash_sharing=True,
+            call_seq='auto',
+            fees=fees,
+            init_cash=initial_cash,
+            freq='D',
+            min_size=0.01,
+            size_granularity=0.01
+        )
+        
+        return portfolio
+    
     def get_best_param(self, metric: str = 'total_return', top_n: int = 1) -> pd.DataFrame:
         """Convenience helper to fetch the top parameter sets.
 
@@ -182,11 +302,11 @@ class ReallocationBackTest(BackTest):
             param_df[metric] = ranked.to_numpy()
             return param_df.reset_index(drop=True)
 
-        metadata = getattr(self.strategy, 'param_metadata', None)
+        metadata = getattr(self, 'param_metadata', None)
         if metadata is not None and not metadata.empty:
             return metadata.reset_index().iloc[[0]].reset_index(drop=True)
 
-        param_map = getattr(self.strategy, 'param_group_map', None)
+        param_map = getattr(self, 'param_group_map', None)
         if isinstance(param_map, dict) and 0 in param_map:
             return pd.DataFrame([param_map[0]])
 
@@ -286,7 +406,7 @@ class ReallocationBackTest(BackTest):
         column_levels = kwargs.pop('column_levels', None)
 
         if index_levels is None or column_levels is None:
-            metadata = getattr(self.strategy, 'param_metadata', None)
+            metadata = getattr(self, 'param_metadata', None)
             if (
                 metadata is None
                 or metadata.empty
@@ -338,7 +458,7 @@ class ReallocationBackTest(BackTest):
             except Exception as e:
                 raise ValueError(f"Unknown portfolio column: {column}. Error: {e}")
         
-        num_assets = len(self.strategy.backtest_prices.columns)
+        num_assets = len(self.backtest_prices.columns)
         base_colors = plotly_colors.Set1
         color_cycle = (base_colors * ((num_assets // len(base_colors)) + 1))[:num_assets]
 
@@ -355,15 +475,15 @@ class ReallocationBackTest(BackTest):
         )
 
         orders = self.pf.orders.records
-        price_index = self.strategy.backtest_prices.index
+        price_index = self.backtest_prices.index
 
         # Panel 1: price evolution augmented with buy/sell markers sourced from
         # vectorbt order records.
-        for i, col in enumerate(self.strategy.backtest_prices.columns):
+        for i, col in enumerate(self.backtest_prices.columns):
             fig.add_trace(
                 go.Scatter(
                     x=price_index,
-                    y=self.strategy.backtest_prices.iloc[:, i],
+                    y=self.backtest_prices.iloc[:, i],
                     mode='lines',
                     line=dict(color=color_cycle[i], width=2),
                     name=str(col),
@@ -423,9 +543,9 @@ class ReallocationBackTest(BackTest):
             weights = weights.copy()
             weights.columns = weights.columns.get_level_values(-1)
 
-        weights = weights.reindex(columns=self.strategy.backtest_prices.columns)
+        weights = weights.reindex(columns=self.backtest_prices.columns)
 
-        for i, col in enumerate(self.strategy.backtest_prices.columns):
+        for i, col in enumerate(self.backtest_prices.columns):
             fig.add_trace(
                 go.Scatter(
                     x=weights.index,
@@ -448,7 +568,7 @@ class ReallocationBackTest(BackTest):
 
         portfolio_returns = (portfolio_value / self.pf.init_cash - 1) * 100
 
-        benchmark_returns = self.strategy.backtest_prices.pct_change().mean(axis=1).fillna(0)
+        benchmark_returns = self.backtest_prices.pct_change().mean(axis=1).fillna(0)
         benchmark_cumret = ( (1 + benchmark_returns).cumprod() - 1 )* 100
 
         fig.add_trace(
