@@ -28,12 +28,6 @@ from dffc.data_provider.eastmoney_provider import (
 
 from dffc.data_provider.fund_est_val_crawler import FundEstimateProvider
 
-# 尝试导入爬虫模块
-try:
-    from dffc.data_provider.stock_net_value_crawler import *
-except ImportError:
-    pass  # 如果依赖不满足，忽略导入错误
-
 __all__ = [
     # 基础类
     'DataProviderConfig', 

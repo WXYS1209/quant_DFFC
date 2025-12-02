@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from bs4 import BeautifulSoup
 import pandas as pd
+import pytz
 
 from .base import BS4DataProvider, DataProviderConfig
 from .._utils import DataFetchError, validate_fund_code, validate_stock_code, safe_float_convert
@@ -248,7 +249,9 @@ class EastMoneyStockProvider(BS4DataProvider):
                     continue
                 
                 try:
-                    trade_date = datetime.strptime(parts[0], '%Y-%m-%d')
+                    trade_date_naive = datetime.strptime(parts[0], '%Y-%m-%d')
+                    tz_sh = pytz.timezone("Asia/Shanghai")
+                    trade_date = tz_sh.localize(trade_date_naive)
                     
                     # 过滤日期范围
                     if trade_date < start_date or trade_date > end_date:

@@ -28,6 +28,7 @@ from dffc.holt_winters import *
 
 # 导入核心功能
 from dffc.fund_data import *
+from dffc.stock_data import *
 
 # 导入策略模块 
 from dffc.strategies import *

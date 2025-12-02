@@ -20,6 +20,7 @@ dependencies = [
     "yfinance",
     "tqdm",
     "streamlit",
+    "streamlit-autorefresh",
 ]
 
 [tool.setuptools]
