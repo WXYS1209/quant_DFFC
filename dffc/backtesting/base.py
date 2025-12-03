@@ -1,17 +1,12 @@
 """Backtest orchestration helpers.
 
-This module houses light-weight wrappers around strategy instances so that
-callers can run a backtest, inspect statistics, and render plots without
-rewriting boilerplate code.  The public surface is intentionally small: supply
-an already-configured strategy, optionally pass default keyword arguments for
-`run_backtest`, and use :class:`BackTest` or its subclasses to analyse and
-visualise the results.
-
-Notes
------
-BackTest never mutates the provided strategy beyond what
-``strategy.run_backtest`` already performs internally.  The same strategy
-instance can therefore be safely reused for multiple runs.
+Provides thin wrappers around strategy instances so callers can execute a run,
+inspect statistics, and generate plots without duplicating boilerplate. Supply
+an already configured strategy, call :class:`BackTest` (or its subclasses)
+through the standard ``run → stats → plot`` workflow, and consume the
+``vectorbt.Portfolio`` stored on ``self.pf`` after each run. The wrappers do
+not mutate strategy state beyond what the strategy methods themselves perform,
+so the same instance can be reused safely across runs.
 """
 from __future__ import annotations
 
@@ -48,10 +43,8 @@ class BackTest(ABC):
     indicating whether the run produced multiple parameter groups.
     """
 
-    def __init__(self, strategy: Any, **run_kwargs: Any) -> None:
+    def __init__(self, strategy: Any) -> None:
         self.strategy = strategy
-        # Default kwargs for strategy.run_backtest; can be overridden per call in run()
-        self._run_defaults = dict(run_kwargs)
         self._multi = None
 
     @abstractmethod
@@ -79,10 +72,6 @@ class BackTest(ABC):
             Either a ``pandas.DataFrame`` for multi-parameter runs or the raw
             ``vectorbt`` stats object for single runs.
 
-        Raises
-        ------
-        ValueError
-            If ``selected`` does not correspond to a valid portfolio column.
         """
         if not hasattr(self, 'pf'):
             raise RuntimeError('BackTest.run() must be called before stats().')
@@ -157,26 +146,33 @@ class ReallocationBackTest(BackTest):
             fees=0.,
             trade_delay=0,
             max_workers: int | None = None):
+        """Execute the reallocation strategy and build the vectorbt portfolio.
+
+        Parameters
+        ----------
+        start_date, end_date : datetime-like, optional
+            Inclusive bounds for the backtest window (converted to timezone-aware datetimes).
+        group_by : str, optional
+            Column level used when grouping parameter combinations; defaults to ``'param_group'``.
+        initial_cash : float, default 10000.
+            Starting capital passed to vectorbt.
+        fees : float, default 0.
+            Proportional transaction fee applied to each order.
+        trade_delay : int, default 0
+            Execution delay in days (``0`` = T+0, ``1`` = T+1, etc.).
+        max_workers : int, optional
+            Number of worker processes for parameter sweeps; ``None`` picks the default, values <=1 run sequentially.
+
+        Notes
+        -----
+        The resulting ``vectorbt.Portfolio`` is stored on ``self.pf`` for later access.
         """
-        运行再平衡策略回测（支持多资产）
-        
-        Args:
-            initial_cash: float, 初始资金
-            fees: float, 交易费用率
-            trade_delay: int, 交易执行延迟天数 (0=T+0, 1=T+1, 2=T+2, etc.)
-                        基金推荐使用 trade_delay=1 (T+1)
-            max_workers: Optional[int], 使用进程池处理参数组合的最大进程数。
-                         None 表示使用默认值；≤1 则按顺序执行。
-            
-        Returns:
-            SimpleNamespace: 结果对象，可通过 res.portfolio 访问（也支持 dict 风格 via vars(res)['portfolio']）
-        """
-        
         if start_date is not None:
             start_date = to_tzaware_datetime(start_date)
         if end_date is not None:
             end_date = to_tzaware_datetime(end_date)
-        self.backtest_prices = self.strategy.prices.loc[start_date:end_date]
+        price_window = self.strategy.set_backtest_window(start_date, end_date)
+        self.backtest_prices = price_window
 
         combos = self.strategy._get_param_combinations()
         self.combos = combos
@@ -262,7 +258,7 @@ class ReallocationBackTest(BackTest):
                                 .set_index('param_group')
                                 .sort_index())
         
-        # 使用vectorbt运行回测
+        # Run the backtest via vectorbt
         portfolio = vbt.Portfolio.from_orders(
             close=self.backtest_prices_tiled,
             size=self.orders_size,
@@ -277,7 +273,7 @@ class ReallocationBackTest(BackTest):
             size_granularity=0.01
         )
         
-        return portfolio
+        self.pf = portfolio
     
     def get_best_param(self, metric: str = 'total_return', top_n: int = 1) -> pd.DataFrame:
         """Convenience helper to fetch the top parameter sets.
@@ -399,7 +395,7 @@ class ReallocationBackTest(BackTest):
             Interactive figure describing the backtest outcome.
         """
         if not self._multi:
-            # 单参数组合单资产
+            # Single-parameter runs use the detailed dashboard
             return self._plot_single(**kwargs)
 
         index_levels = kwargs.pop('index_levels', None)

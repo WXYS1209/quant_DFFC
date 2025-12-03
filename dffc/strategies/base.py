@@ -1,30 +1,14 @@
-"""
-Improved vectorbt dual asset rebalancing strategy
-Based on MarketCalls tutorial best practices
+"""Strategy primitives powering the reallocation backtest stack.
 
-Features:
-- Multi-asset rebalancing framework
-- Configurable rebalancing frequency (D/W/M/Q/Y)
-- Gradual weight adjustment with tolerance
-- Simple trade execution delay support via weight matrix shifting
-- Comprehensive performance analysis and visualization
+The module provides abstract base classes that encapsulate raw price data,
+expose helpers for slicing the active backtest window, and translate target
+weights into ``vectorbt`` order matrices. Concrete strategies inherit from
+these classes and are orchestrated by :class:`dffc.backtesting.ReallocationBackTest`.
 
-Trade Delay Implementation:
-- Simple and efficient: directly shifts weight matrix by N days
-- T+0 (trade_delay=0): Immediate execution, suitable for stocks
-- T+1 (trade_delay=1): Next-day execution, suitable for funds
-- T+2+ (trade_delay=2+): Multi-day delay, suitable for special instruments
-
-Usage:
-    strategy = DualReallocationStrategy(prices=data, ...)
-    res = strategy.run_backtest(
-        initial_cash=100000,
-        fees=0.001,
-        trade_delay=1  # T+1 for funds
-    )
-    portfolio = res.portfolio
-    rebalances = res.actual_rebalances
-    weights = res.actual_weights
+Key capabilities:
+- Multi-asset price slicing that keeps the strategy state in sync with each run
+- Gradual adjustment and trade-delay helpers shared by subclasses
+- Parameter combination utilities that integrate with the backtest wrappers
 """
 import numpy as np
 import pandas as pd
@@ -45,43 +29,67 @@ vbt.settings.portfolio.stats['incl_unrealized'] = True
 pd.set_option('future.no_silent_downcasting', True)
 
 class Strategy(ABC):
-    """
-    vectorbt-based strategy base class
-    
-    Abstract base class for all strategies, defines basic interface and common functionality
+    """Base interface for vectorbt-compatible strategies.
+
+    Each strategy stores the original price history and exposes lifecycle
+    hooks consumed by the backtest orchestration layer.
     """
     
     def __init__(self, 
                  prices: tp.ArrayLike, 
                  **kwargs):
-        """
-        Initialize strategy base class
-        
+        """Persist raw prices and subclass-specific configuration.
+
         Args:
-            prices: DataFrame, price data
-            **kwargs: other strategy-specific parameters
+            prices: DataFrame of asset prices indexed by datetime.
+            **kwargs: Optional strategy-specific parameters stored by subclasses.
         """
         self.prices = prices
+        self.backtest_prices = None
+
+    def set_backtest_window(self,
+                             start_date=None,
+                             end_date=None) -> pd.DataFrame:
+        """Capture the price slice used for the current backtest run.
+
+        Args:
+            start_date: Optional inclusive lower timestamp bound.
+            end_date: Optional inclusive upper timestamp bound.
+
+        Returns:
+            pandas.DataFrame holding the selected window stored on ``backtest_prices``.
+        """
+        if not isinstance(self.prices, pd.DataFrame):
+            raise TypeError("Strategy.prices must be a DataFrame to slice by date range")
+        
+        # print(start_date, end_date)
+        if start_date is None and end_date is None:
+            window = self.prices
+        else:
+            window = self.prices.loc[start_date:end_date]
+
+        if window.empty:
+            raise ValueError("Selected backtest window is empty")
+
+        self.backtest_prices = window
+        return window
     
 class ReallocationStrategy(Strategy):
-    """
-    General rebalancing strategy base class
-    
-    Multi-asset weight rebalancing framework that provides common rebalancing logic
+    """Shared utilities for weight-based reallocation strategies.
+
+    Encapsulates gradual adjustment helpers, trade-delay handling, and
+    parameter-combination plumbing reused by concrete implementations.
     """
     
     def __init__(self, 
                  prices: tp.ArrayLike,
                  # rebalance_freq: str = 'D',
                  **kwargs) -> None:
-        """
-        Initialize rebalancing strategy
-        
+        """Initialise the strategy scaffolding for subclasses.
+
         Args:
-            prices: DataFrame, price data (supports multi-asset)
-            rebalance_freq: str, rebalancing frequency ('D', 'W', 'M', 'Q', 'Y')
-            adjust_factor: float, weight adjustment factor (0-1), 1 means immediately adjust to target weight
-            **kwargs: other strategy parameters
+            prices: DataFrame of asset prices forwarded to ``Strategy``.
+            **kwargs: Additional parameters captured by subclass implementations.
         """
         super().__init__(prices, **kwargs)
         # self.rebalance_freq = rebalance_freq
@@ -155,16 +163,17 @@ class ReallocationStrategy(Strategy):
                                   adjust_factor: float = 1.0,
                                   tolerance: float = 0.01):
         """
-        Apply gradual adjustment logic (supports multi-asset)
-        
+        Apply gradual adjustment logic to the desired weight path.
+
         Args:
-            target_weights: DataFrame, desired target weights over time
-            rb_mask: Series or array, optional rebalancing schedule hints
-            tolerance: float, weight difference tolerance
-            
+            weights: DataFrame of target weights over time.
+            rb_mask: Boolean Series/array that signals rebalance slots.
+            adjust_factor: Fraction of the gap closed whenever rebalancing.
+            tolerance: Minimum absolute weight delta that triggers trades.
+
         Returns:
-            actual_weights: DataFrame, actual weight series
-            actual_rebalances: Series, actual rebalancing schedule
+            actual_weights: DataFrame of realised weights after smoothing.
+            actual_rebalances: Series flagging rows where adjustments occur.
         """
         if weights is None:
             raise ValueError("weights must be provided for gradual adjustment")
@@ -256,11 +265,10 @@ class ReallocationStrategy(Strategy):
     
     @abstractmethod
     def _generate_target_weights(self, param_comb, **kwargs):
-        """
-        生成目标权重序列 - 子类必须实现
-        
+        """Build the per-asset target weight path for one parameter combination.
+
         Returns:
-            target_weights: DataFrame, 目标权重序列（每行权重之和应为1）
+            pandas.DataFrame aligned with ``backtest_prices`` where each row sums to 1.
         """
         pass
     
@@ -278,6 +286,8 @@ class ReallocationStrategy(Strategy):
                        trade_delay: int,
                        group_by: str) -> tuple[int, dict, pd.DataFrame]:
         """Helper to generate orders for a single parameter combination."""
+        if self.backtest_prices is None:
+            raise RuntimeError("set_backtest_window must be called before processing parameter combos")
         targets_weights = self._generate_target_weights(combo)
         self.target_weights = targets_weights
         orders, _, _ = ReallocationStrategy._prepare_orders(
