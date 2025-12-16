@@ -1,0 +1,13 @@
+{
+  "code": "501029",
+  "status": "success",
+  "data_points": null,
+  "params": {
+    "alpha": 0.1104,
+    "beta": 0,
+    "gamma": 0.0435,
+    "season_length": 24,
+    "mse": null
+  },
+  "results_df": []
+}

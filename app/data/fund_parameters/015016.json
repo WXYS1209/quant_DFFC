@@ -1,0 +1,13 @@
+{
+  "code": "015016",
+  "status": null,
+  "data_points": null,
+  "params": {
+    "alpha": 0.04368,
+    "beta": 0.025886,
+    "gamma": 0.420741,
+    "season_length": 15,
+    "mse": null
+  },
+  "results_df": []
+}

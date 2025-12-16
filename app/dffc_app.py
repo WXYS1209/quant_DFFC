@@ -37,14 +37,9 @@ def main() -> None:
     pages_dir = APP_DIR / "pages"
     n_pages = len([p for p in pages_dir.glob("*.py") if p.is_file()]) if pages_dir.exists() else 0
     nav_cols = st.columns(max(n_pages, 2))
-    if nav_cols[0].button("🧾 1. 数据下载", use_container_width=True):
-        st.switch_page("pages/1_data.py")
-    if nav_cols[1].button("📈 2. Holt-Winters 优化", use_container_width=True):
-        st.switch_page("pages/2_holt_winters.py")
-    # if nav_cols[2].button("🧪 3. 策略回测", use_container_width=True):
-    #     st.switch_page("pages/3_backtest.py")
-
-
-
+    if nav_cols[0].button("📈 1. 监控面板", use_container_width=True):
+        st.switch_page("pages/1_monitor.py")
+    if nav_cols[1].button("📈 2. 优化器", use_container_width=True):
+        st.switch_page("pages/2_optimizer.py")
 if __name__ == "__main__":
 	main()

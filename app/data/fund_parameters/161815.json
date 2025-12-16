@@ -1,0 +1,13 @@
+{
+  "code": "161815",
+  "status": null,
+  "data_points": null,
+  "params": {
+    "alpha": 0.14539,
+    "beta": 0.002194,
+    "gamma": 0.0181,
+    "season_length": 21,
+    "mse": null
+  },
+  "results_df": []
+}

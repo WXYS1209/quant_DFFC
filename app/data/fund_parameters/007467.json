@@ -1,0 +1,13 @@
+{
+  "code": "007467",
+  "status": null,
+  "data_points": null,
+  "params": {
+    "alpha": 0.08776,
+    "beta": 0.05789,
+    "gamma": 0.09095,
+    "season_length": 17,
+    "mse": null
+  },
+  "results_df": []
+}
